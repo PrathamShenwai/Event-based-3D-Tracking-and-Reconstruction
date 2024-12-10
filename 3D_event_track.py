@@ -10,45 +10,44 @@ import os
 
 # --- Configurable Parameters ---
 
-CALIBRATION_FILE = '/home/pratham/UNSW/camera_calib/stereo-camera-calibration/calibration_results_new_4.10/calibration_results.json'
-LEFT_VIDEO_PATH = '/home/pratham/UNSW/camera_calib/stereo-camera-calibration/bee_flights_2-10/rec3/left.avi'
-RIGHT_VIDEO_PATH = '/home/pratham/UNSW/camera_calib/stereo-camera-calibration/bee_flights_2-10/rec3/right.avi'
-OUTPUT_LEFT_CSV = '/home/pratham/UNSW/camera_calib/stereo-camera-calibration/plots/vicon/exp4/output_left.csv'
-OUTPUT_RIGHT_CSV = '/home/pratham/UNSW/camera_calib/stereo-camera-calibration/plots/vicon/exp4/output_right.csv'
-OUTPUT_3D_CSV = '/home/pratham/UNSW/camera_calib/stereo-camera-calibration/plots/vicon/exp4/output_3D.csv'
-OUTPUT_TRIANGULATION_CSV = '/home/pratham/UNSW/camera_calib/stereo-camera-calibration/plots/vicon/exp4/output_triangulationcheck.csv'  # New CSV for 3D points
+CALIBRATION_FILE = '<path to your file here>'
+LEFT_VIDEO_PATH = '<path to your file here'
+RIGHT_VIDEO_PATH = '<path to your file here'
+OUTPUT_LEFT_CSV = '<path to your file here'
+OUTPUT_RIGHT_CSV = '<path to your file here'
+OUTPUT_TRIANGULATION_CSV = '<path to your file here'  
 
 # Display settings
-SCALE_PERCENT = 75  # Percent of the original size for display windows
-EPILINE_COLOR = (0, 255, 0)  # Color for drawing epipolar lines (Green)
-MATCH_LINE_COLOR = (0, 0, 255)  # Color for drawing matching lines (Red)
-BLOB_CIRCLE_COLOR = (0, 0, 255)  # Color for drawing circles around matched blobs
-BLOB_CIRCLE_RADIUS = 10  # Radius of circles drawn around matched blobs
-BLOB_CIRCLE_THICKNESS = -1  # Thickness of circles around matched blobs (filled if negative)
-MATCH_LINE_THICKNESS = 1  # Thickness of the matching line between blobs
+SCALE_PERCENT = <Your Value>  # Percent of the original size for display windows
+EPILINE_COLOR = <Your Value>  # Color for drawing epipolar lines (Green)
+MATCH_LINE_COLOR = <Your Value>  # Color for drawing matching lines (Red)
+BLOB_CIRCLE_COLOR = <Your Value>  # Color for drawing circles around matched blobs
+BLOB_CIRCLE_RADIUS = <Your Value>  # Radius of circles drawn around matched blobs
+BLOB_CIRCLE_THICKNESS = <Your Value>  # Thickness of circles around matched blobs (filled if negative)
+MATCH_LINE_THICKNESS = <Your Value> # Thickness of the matching line between blobs
 
 # Blob detection settings
-BLOB_MEDIAN_BLUR_KERNEL = 5
-BLOB_THRESHOLD_VALUE = 70
-BLOB_MIN_SIZE = 20  # Minimum size of detected blobs
+BLOB_MEDIAN_BLUR_KERNEL = <Your Value>
+BLOB_THRESHOLD_VALUE = <Your Value>
+BLOB_MIN_SIZE = <Your Value> # Minimum size of detected blobs
 
 # Kalman filter settings
-KALMAN_PROCESS_NOISE_COV = np.array([[8, 0, 0, 0], [0, 8, 0, 0], [0, 0, 8, 0], [0, 0, 0, 8]], np.float32)
-KALMAN_MEASUREMENT_NOISE_COV = np.array([[1, 0], [0, 1]], np.float32)
+KALMAN_PROCESS_NOISE_COV = <Your Value>  #example: np.array([[8, 0, 0, 0], [0, 8, 0, 0], [0, 0, 8, 0], [0, 0, 0, 8]], np.float32)
+KALMAN_MEASUREMENT_NOISE_COV =<Your Value> #example: np.array([[1, 0], [0, 1]], np.float32)
 
-KALMAN_ERROR_COV_PRE = np.eye(4, dtype=np.float32) * 1000
+KALMAN_ERROR_COV_PRE = <Your Value> #example:np.eye(4, dtype=np.float32) * 1000
 
 # Gating thresholds for tracker association
-MAX_VELOCITY_THRESHOLD = 30
-VELOCITY_THRESHOLD = 30
-MAX_DISTANCE_THRESHOLD = 5
-DISTANCE_THRESHOLD = 5
+MAX_VELOCITY_THRESHOLD = <Your Value>
+VELOCITY_THRESHOLD = <Your Value>
+MAX_DISTANCE_THRESHOLD = <Your Value>
+DISTANCE_THRESHOLD = <Your Value>
 
 # Tracker settings
-MAX_LOST_FRAMES = 8  # Maximum allowed lost frames before a tracker is deactivated
-COST_MATRIX_THRESHOLD = 180  # Threshold for cost matrix in linear assignment
+MAX_LOST_FRAMES = <Your Value>  # Maximum allowed lost frames before a tracker is deactivated
+COST_MATRIX_THRESHOLD = <Your Value>  # Threshold for cost matrix in linear assignment
 
-FPS = 30  # Set this according to your video frame rate
+FPS = <Your Value>  # Set this according to your video frame rate
 TIME_PER_FRAME = 1 / FPS
 
 # Display wait key settings
@@ -614,12 +613,12 @@ def main():
     width = int(left_cap.get(cv2.CAP_PROP_FRAME_WIDTH))  # Original width
     height = int(left_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))  # Original height
     fourcc = cv2.VideoWriter_fourcc(*'XVID')
-    left_output = cv2.VideoWriter('/home/pratham/UNSW/camera_calib/stereo-camera-calibration/plots/flightgandhi/rec1/output_left1.avi', fourcc, FPS, (width, height))
-    right_output = cv2.VideoWriter('/home/pratham/UNSW/camera_calib/stereo-camera-calibration/plots/flightgandhi/rec1/output_right1.avi', fourcc, FPS, (width, height))
+    left_output = cv2.VideoWriter('<Your output location/filename.avi>', fourcc, FPS, (width, height))
+    right_output = cv2.VideoWriter('<Your output location/filename.avi>', fourcc, FPS, (width, height))
 
     # Create directories to store output images
-    output_left_images_dir = '/home/pratham/UNSW/camera_calib/stereo-camera-calibration/plots/flightgandhi/rec1/left_frames1/'
-    output_right_images_dir = '/home/pratham/UNSW/camera_calib/stereo-camera-calibration/plots/flightgandhi/rec1/right_frames1/'
+    output_left_images_dir = '<Your output location/folder_left/>'
+    output_right_images_dir = 'Your output location/folder_right/'
     os.makedirs(output_left_images_dir, exist_ok=True)
     os.makedirs(output_right_images_dir, exist_ok=True)
 
