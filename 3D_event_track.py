@@ -49,6 +49,7 @@ COST_MATRIX_THRESHOLD = <Your Value>  # Threshold for cost matrix in linear assi
 
 FPS = <Your Value>  # Set this according to your video frame rate
 TIME_PER_FRAME = 1 / FPS
+INACTIVITY_THRESHOLD_FRAMES = 5 * FPS
 
 # Display wait key settings
 DISPLAY_WAIT_KEY = 1  # Milliseconds to wait between frames
@@ -56,6 +57,19 @@ DISPLAY_WAIT_KEY = 1  # Milliseconds to wait between frames
 
 
 # --------------------------------
+
+# Global color map dictionary
+color_map = {}
+
+def get_color(id):
+    """
+    Retrieves the color associated with a given tracker ID.
+    If the ID is not in the color_map, assigns a new random color.
+    """
+    if id not in color_map:
+        np.random.seed(id)  # Seed with ID for consistent color assignment
+        color_map[id] = tuple(np.random.randint(0, 255, size=3).tolist())
+    return color_map[id]
 
 # Load calibration data
 def load_calibration_data(filename):
@@ -99,7 +113,10 @@ def draw_matching_lines(left_image, right_image, matches):
         right_point = match['Right_Point']
         cv2.circle(left_image, left_point, BLOB_CIRCLE_RADIUS, BLOB_CIRCLE_COLOR, BLOB_CIRCLE_THICKNESS)
         cv2.circle(right_image, right_point, BLOB_CIRCLE_RADIUS, BLOB_CIRCLE_COLOR, BLOB_CIRCLE_THICKNESS)
-        cv2.line(right_image, (right_point[0], right_point[1]), (left_point[0], right_point[1]), MATCH_LINE_COLOR, MATCH_LINE_THICKNESS)
+        # Draw a horizontal line connecting the same y in the right image to show matches
+        cv2.line(right_image, (right_point[0], right_point[1]),
+                 (left_point[0], right_point[1]),
+                 MATCH_LINE_COLOR, MATCH_LINE_THICKNESS)
 
 def detect_blobs(frame):
     """Detect blobs in a given frame using contour detection."""
@@ -130,57 +147,29 @@ def calculate_point_to_line_distance(point, line):
     distance = np.abs(line[0] * point[0] + line[1] * point[1] + line[2]) / np.sqrt(line[0]**2 + line[1]**2)
     return distance
 
-
-
-def compute_matching_scores(left_blobs, right_blobs, F, left_trackers, right_trackers):
-    """Compute matching scores considering epipolar distance, blob size, and velocity."""
+def compute_matching_scores(left_blobs, right_blobs, F):
     matches = []
     num_left_points = len(left_blobs)
     num_right_points = len(right_blobs)
-    cost_matrix = np.full((num_left_points, num_right_points), np.inf)  # Initialize cost matrix with large values
+    cost_matrix = np.zeros((num_left_points, num_right_points))
 
-    for i, (left_point, left_size, _) in enumerate(left_blobs):
+    for i, (left_point, _, _) in enumerate(left_blobs):
         epiline = compute_epipolar_line(F, left_point)
 
-        for j, (right_point, right_size, _) in enumerate(right_blobs):
-            # Compute epipolar distance
-            epipolar_distance = calculate_point_to_line_distance(right_point, epiline)
+        for j, (right_point, _, _) in enumerate(right_blobs):
+            distance = calculate_point_to_line_distance(right_point, epiline)
+            cost_matrix[i, j] = distance
 
-            # Compute size difference
-            size_difference = abs(left_size - right_size)
-
-            # Compute velocity cost if trackers exist for these blobs
-            velocity_cost = 0
-            left_tracker = find_tracker_by_position(left_trackers, left_point)
-            right_tracker = find_tracker_by_position(right_trackers, right_point)
-            if left_tracker and right_tracker:
-                vel_left = np.array([left_tracker.vel_x, left_tracker.vel_y])
-                vel_right = np.array([right_tracker.vel_x, right_tracker.vel_y])
-                velocity_cost = np.linalg.norm(vel_left - vel_right)
-
-            # Compute overall cost as weighted sum of components
-            cost = (
-                epipolar_distance * 0.5  # Weight for epipolar distance
-                + size_difference * 0.3  # Weight for size difference
-                + velocity_cost * 0.2  # Weight for velocity difference
-            )
-
-            cost_matrix[i, j] = cost
-
-    # Solve the assignment problem
     row_indices, col_indices = linear_sum_assignment(cost_matrix)
-
     for row, col in zip(row_indices, col_indices):
-        if cost_matrix[row, col] < COST_MATRIX_THRESHOLD:
+        if cost_matrix[row, col] < 9:
             match_info = {
                 'Left_Point': left_blobs[row][0],
                 'Right_Point': right_blobs[col][0],
-                'Distance': cost_matrix[row, col],
-                'Size_Difference': abs(left_blobs[row][1] - right_blobs[col][1]),
-                'Epipolar_Distance': calculate_point_to_line_distance(right_blobs[col][0], compute_epipolar_line(F, left_blobs[row][0]))
+                'Distance': cost_matrix[row, col]
             }
             matches.append(match_info)
-
+    
     return matches
 
 def triangulate_points(matches, calib_data):
@@ -193,10 +182,6 @@ def triangulate_points(matches, calib_data):
         right_point_hom = np.array([match['Right_Point'][0], match['Right_Point'][1], 1], dtype=np.float64)
         point_4D_hom = cv2.triangulatePoints(P1, P2, left_point_hom[:2], right_point_hom[:2])
         point_3D = point_4D_hom[:3] / point_4D_hom[3]
-        
-        # Invert Y-axis to make it increase upwards
-        point_3D[1] = -point_3D[1]
-        
         points_3D.append(point_3D)
 
     points_3D = np.array(points_3D)  # Convert to numpy array for further processing
@@ -206,47 +191,52 @@ def triangulate_points(matches, calib_data):
 
     return points_3D
 
-def calculate_reprojection_error(rectified_projection_matrix, points_3D, rectified_points_2D):
-    # Ensure points_3D is a 2D array (N, 3)
+def calculate_reprojection_error(projection_matrix, points_3D, points_2D):
+    # Ensure points_3D is a 2D array
     if points_3D.ndim == 3:
         points_3D = points_3D.reshape(-1, 3)
 
-    # Convert 3D points to homogeneous coordinates by adding an additional dimension of 1s
+    # Convert 3D points to homogeneous coordinates
     points_3D_homogeneous = np.hstack((points_3D, np.ones((points_3D.shape[0], 1))))
 
-    # Project 3D points onto the 2D rectified image plane using the rectified projection matrix
-    projected_points_2D_homogeneous = rectified_projection_matrix @ points_3D_homogeneous.T
+    # Project 3D points back onto the 2D image plane
+    projected_points_2D_homogeneous = projection_matrix @ points_3D_homogeneous.T
 
-    # Convert homogeneous 2D coordinates to Cartesian (x, y) coordinates
+    # Convert homogeneous to Cartesian coordinates (2D)
     projected_points_2D = projected_points_2D_homogeneous[:2] / projected_points_2D_homogeneous[2]
 
-    # Ensure projected_points_2D has the correct shape (N, 2) after transpose
+    # Ensure projected_points_2D has the correct shape (N, 2)
     projected_points_2D = projected_points_2D.T  # Shape should be (N, 2) after transpose
 
-    # Check that the shape of rectified_points_2D matches projected_points_2D
-    if rectified_points_2D.shape != projected_points_2D.shape:
-        raise ValueError(f"Shape mismatch: rectified_points_2D has shape {rectified_points_2D.shape}, "
+    # Check that points_2D also has shape (N, 2)
+    if points_2D.shape != projected_points_2D.shape:
+        raise ValueError(f"Shape mismatch: points_2D has shape {points_2D.shape}, "
                          f"but projected_points_2D has shape {projected_points_2D.shape}.")
 
-    # Compute the reprojection error as the Euclidean distance between actual and projected 2D points
-    errors = np.linalg.norm(rectified_points_2D - projected_points_2D, axis=1)
-
-    # Compute the mean reprojection error
+    # Compute reprojection error
+    errors = np.linalg.norm(points_2D - projected_points_2D, axis=1)
     mean_error = np.mean(errors)
 
     return mean_error
 
-
 class AdaptiveKalmanFilter:
     def __init__(self, initial_position):
         self.kalman = cv2.KalmanFilter(4, 2)
-        self.kalman.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], np.float32)
-        self.kalman.transitionMatrix = np.array([[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]], np.float32)
+        self.kalman.measurementMatrix = np.array([[1, 0, 0, 0], 
+                                                  [0, 1, 0, 0]], np.float32)
+        self.kalman.transitionMatrix = np.array([[1, 0, 1, 0], 
+                                                 [0, 1, 0, 1], 
+                                                 [0, 0, 1, 0], 
+                                                 [0, 0, 0, 1]], np.float32)
         self.kalman.processNoiseCov = KALMAN_PROCESS_NOISE_COV
         self.kalman.measurementNoiseCov = KALMAN_MEASUREMENT_NOISE_COV
         self.kalman.errorCovPre = KALMAN_ERROR_COV_PRE
-        self.kalman.statePre = np.array([[initial_position[0]], [initial_position[1]], [0], [0]], np.float32)
-        self.kalman.statePost = np.array([[initial_position[0]], [initial_position[1]], [0], [0]], np.float32)
+        self.kalman.statePre = np.array([[initial_position[0]], 
+                                         [initial_position[1]], 
+                                         [0], [0]], np.float32)
+        self.kalman.statePost = np.array([[initial_position[0]], 
+                                          [initial_position[1]], 
+                                          [0], [0]], np.float32)
         self.adaptive_scale = 1.0
 
     def predict(self):
@@ -271,60 +261,68 @@ class AdaptiveKalmanFilter:
         self.kalman.measurementNoiseCov = np.eye(2, dtype=np.float32) * (1.0 * self.adaptive_scale)
 
 class Tracker:
-    def __init__(self, id, initial_position, initial_size, initial_z=0):
+    def __init__(self, id, initial_position_left=None, initial_position_right=None, initial_size=0):
         self.id = id
-        self.kalman_filter = AdaptiveKalmanFilter(initial_position)
+        self.color = get_color(self.id)
+        self.kalman_filter = AdaptiveKalmanFilter(initial_position_left if initial_position_left else (0,0))
         self.lost_frames = 0
         self.active = True
-        self.color = self.generate_color()
-        self.positions = [initial_position]
-        self.last_position = initial_position
         self.vel_x = 0
         self.vel_y = 0
-        self.vel_z = 0  # Initialize Z velocity
-        self.size = initial_size  # Store the initial size of the blob
-        self.z_positions = [initial_z]  # Track Z positions
+        self.vel_z = 0
+        self.size = initial_size
+        self.z_positions = []
 
-    def generate_color(self):
-        np.random.seed(self.id)
-        return tuple(np.random.randint(0, 255, size=3).tolist())
+        # Separate position lists for left and right views
+        self.positions_left = []
+        self.positions_right = []
 
-    def update_position(self, new_position, new_size, new_z=0):
-        if len(self.positions) > 0:
-            prev_position = self.positions[-1]
-            self.vel_x = (new_position[0] - prev_position[0]) / TIME_PER_FRAME
-            self.vel_y = (new_position[1] - prev_position[1]) / TIME_PER_FRAME
-            if len(self.z_positions) > 0:
-                prev_z = self.z_positions[-1]
-                self.vel_z = (new_z - prev_z) / TIME_PER_FRAME  # Calculate Z velocity
-        self.positions.append(new_position)
-        self.z_positions.append(new_z)  # Store the new Z position
-        self.last_position = new_position
-        self.size = new_size  # Update the size of the blob
+        # If initial positions are known
+        if initial_position_left:
+            self.positions_left.append(initial_position_left)
+        if initial_position_right:
+            self.positions_right.append(initial_position_right)
+
+        self.last_position = initial_position_left if initial_position_left else (0,0)
+        self._3D_position = None
+        self.last_matched_flag = 0
+
+        print(f"Created Tracker ID: {self.id} with Color: {self.color}")
+
+    def update_position(self, new_position_left=None, new_position_right=None, new_size=0, new_z=0):
+        # Update velocities based on the left position if available
+        prev_position = self.last_position
+        if new_position_left:
+            self.vel_x = (new_position_left[0] - prev_position[0]) / TIME_PER_FRAME
+            self.vel_y = (new_position_left[1] - prev_position[1]) / TIME_PER_FRAME
+            self.last_position = new_position_left
+            self.positions_left.append(new_position_left)
+
+        # If we have right position for a matched detection
+        if new_position_right:
+            self.positions_right.append(new_position_right)
+
+        self.z_positions.append(new_z)
+        self.size = new_size
+
+    def set_3D_position(self, pos_3D):
+        self._3D_position = pos_3D
+
+    def has_3D_info(self):
+        return self._3D_position is not None
+
+    def get_3D_position(self):
+        return self._3D_position if self._3D_position else (None, None, None)
 
     def size_of_blob(self):
-        return self.size  # Return the size of the blob
+        return self.size
+
+    def get_velocity(self):
+        return self.vel_x, self.vel_y, self.vel_z
 
     def predict_position(self):
         predicted_position = self.kalman_filter.predict()[:2]
         return (int(predicted_position[0]), int(predicted_position[1]))
-
-    def get_velocity(self):
-        return self.vel_x, self.vel_y, self.vel_z  # Return X, Y, Z velocities
-        
-    def get_smoothed_positions(self, window_size=5):
-        if len(self.positions) < window_size:
-            return self.positions
-
-        smoothed_positions = []
-        for i in range(len(self.positions)):
-            start_index = max(0, i - window_size + 1)
-            end_index = i + 1
-            window_positions = self.positions[start_index:end_index]
-            avg_x = sum(pos[0] for pos in window_positions) / len(window_positions)
-            avg_y = sum(pos[1] for pos in window_positions) / len(window_positions)
-            smoothed_positions.append((avg_x, avg_y))
-        return smoothed_positions
 
 
 class TrackerManager:
@@ -346,237 +344,158 @@ class TrackerManager:
             writer.writerow(['ID', 'Frame', 'X', 'Y', 'Z', 'Size', 'Vel_X', 'Vel_Y', 'Vel_Z'])
 
     def log_to_csv(self, tracker, frame_no, matched):
-        if len(tracker.positions) > 0:
-            # Check velocity against the threshold
-            vel_x, vel_y, _ = tracker.get_velocity()
-            velocity_magnitude = np.sqrt(vel_x**2 + vel_y**2)
-
-            # If the velocity exceeds the threshold, skip logging this data point
-            if velocity_magnitude > MAX_VELOCITY_THRESHOLD:
-                print(f"2D Tracker {tracker.id}: Point skipped due to high velocity ({velocity_magnitude:.2f}).")
-                return
-
-            with open(self.csv_file_path, mode='a', newline='') as file:
-                writer = csv.writer(file)
-                last_position = tracker.positions[-1]
-                writer.writerow([
-                    tracker.id,
-                    frame_no,
-                    last_position[0],
-                    last_position[1],
-                    tracker.size_of_blob(),
-                    tracker.vel_x,
-                    tracker.vel_y,
-                    matched
-                ])
-                self.data_logged = True
-
+        if len(tracker.positions_left) > 0:
+            last_position = tracker.positions_left[-1]
+        elif len(tracker.positions_right) > 0:
+            last_position = tracker.positions_right[-1]
+        else:
+            # If no positions at all, we cannot log this tracker
+            return
+    
+        with open(self.csv_file_path, mode='a', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow([
+                tracker.id,
+                frame_no,
+                last_position[0],
+                last_position[1],
+                tracker.size_of_blob(),
+                tracker.vel_x,
+                tracker.vel_y,
+                matched
+            ])
+            self.data_logged = True
+    
     def log_triangulation_to_csv(self, points_3D, frame_no, sizes, velocities, ids):
         if len(points_3D) > 0:
             with open(self.triangulation_csv_path, mode='a', newline='') as file:
                 writer = csv.writer(file)
                 for idx, point_3D in enumerate(points_3D):
-                    vel_x, vel_y, vel_z = velocities[idx]
-                    velocity_magnitude = np.sqrt(vel_x**2 + vel_y**2 + vel_z**2)
-
-                    # Filter out points based on velocity and Z distance
-                    if velocity_magnitude > MAX_VELOCITY_THRESHOLD or np.abs(point_3D[2]) > MAX_DISTANCE_THRESHOLD:
-                        print(f"3D Tracker {ids[idx]}: Point skipped due to outlier ({velocity_magnitude:.2f} velocity or Z-distance).")
-                        continue
-                    
                     writer.writerow([
-                        ids[idx], frame_no, point_3D[0], point_3D[1], point_3D[2], 
-                        sizes[idx], vel_x, vel_y, vel_z
+                        ids[idx], frame_no, point_3D[0], point_3D[1], point_3D[2],
+                        sizes[idx], velocities[idx][0], velocities[idx][1], velocities[idx][2]
                     ])
                 self.data_logged = True
 
     def update_trackers(self, detections, frame_no):
+        # If no detections, increment lost_frames for all trackers
         if not detections:
             for tracker in self.trackers:
                 tracker.lost_frames += 1
-            self.trackers = [tracker for tracker in self.trackers if tracker.lost_frames < self.max_lost_frames]
+            # Remove trackers that have exceeded max_lost_frames
+            self.trackers = [t for t in self.trackers if t.lost_frames < self.max_lost_frames]
             return
 
-        if not self.trackers:
-            for det, size in detections:
-                new_tracker = Tracker(self.id_counter, det, size)
+        detection_positions = []
+        for det in detections:
+            x_left, y_left, size, matched_flag, X_3D, Y_3D, Z_3D, x_right, y_right = det
+            if x_left is not None and y_left is not None:
+                detection_positions.append((x_left, y_left))
+            elif x_right is not None and y_right is not None:
+                detection_positions.append((x_right, y_right))
+            else:
+                # If neither left nor right is available (unexpected), skip
+                detection_positions.append((0, 0))
+
+        detection_positions = np.array(detection_positions)
+
+        if self.trackers:
+            # Get predicted positions from trackers
+            predictions = np.array([t.predict_position() for t in self.trackers])
+
+            # Compute cost matrix as Euclidean distance
+            cost_matrix = np.linalg.norm(predictions[:, None] - detection_positions, axis=2)
+
+            row_indices, col_indices = linear_sum_assignment(cost_matrix)
+
+            assigned_trackers = set()
+            assigned_detections = set()
+
+            for row, col in zip(row_indices, col_indices):
+                if cost_matrix[row, col] < COST_MATRIX_THRESHOLD:
+                    tracker = self.trackers[row]
+                    # Extract detection data
+                    x_left, y_left, size, matched_flag, X_3D, Y_3D, Z_3D, x_right, y_right = detections[col]
+
+                    measure_x = x_left if x_left is not None else x_right
+                    measure_y = y_left if y_left is not None else y_right
+
+                    corrected_position = tracker.kalman_filter.correct((measure_x, measure_y))
+
+                    tracker.update_position(
+                        new_position_left=(x_left, y_left) if x_left is not None and y_left is not None else None,
+                        new_position_right=(x_right, y_right) if x_right is not None and y_right is not None else None,
+                        new_size=size
+                    )
+                    tracker.lost_frames = 0
+                    tracker.active = True
+                    tracker.last_matched_flag = matched_flag
+
+                    if X_3D is not None and Y_3D is not None and Z_3D is not None:
+                        tracker.set_3D_position((X_3D, Y_3D, Z_3D))
+
+                    assigned_trackers.add(row)
+                    assigned_detections.add(col)
+
+            # Increment lost frames for unassigned trackers
+            for i, tracker in enumerate(self.trackers):
+                if i not in assigned_trackers:
+                    tracker.lost_frames += 1
+                    if tracker.lost_frames > self.max_lost_frames:
+                        tracker.active = False
+
+            # Create new trackers for unassigned detections
+            for i, det in enumerate(detections):
+                if i not in assigned_detections:
+                    x_left, y_left, size, matched_flag, X_3D, Y_3D, Z_3D, x_right, y_right = det
+
+                    init_left_pos = (x_left, y_left) if x_left is not None and y_left is not None else None
+                    init_right_pos = (x_right, y_right) if x_right is not None and y_right is not None else None
+
+                    if init_left_pos is None and init_right_pos is not None:
+                        init_left_pos = init_right_pos
+                    elif init_left_pos is None and init_right_pos is None:
+                        continue
+
+                    new_tracker = Tracker(
+                        self.id_counter,
+                        initial_position_left=init_left_pos,
+                        initial_position_right=init_right_pos,
+                        initial_size=size
+                    )
+                    new_tracker.last_matched_flag = matched_flag
+                    if X_3D is not None and Y_3D is not None and Z_3D is not None:
+                        new_tracker.set_3D_position((X_3D, Y_3D, Z_3D))
+                    self.trackers.append(new_tracker)
+                    self.id_counter += 1
+
+            # Remove inactive trackers
+            self.trackers = [t for t in self.trackers if t.active]
+
+        else:
+            # No existing trackers, create new ones for all detections
+            for det in detections:
+                x_left, y_left, size, matched_flag, X_3D, Y_3D, Z_3D, x_right, y_right = det
+
+                init_left_pos = (x_left, y_left) if x_left is not None and y_left is not None else None
+                init_right_pos = (x_right, y_right) if x_right is not None and y_right is not None else None
+
+                if init_left_pos is None and init_right_pos is not None:
+                    init_left_pos = init_right_pos
+                elif init_left_pos is None and init_right_pos is None:
+                    continue
+
+                new_tracker = Tracker(
+                    self.id_counter,
+                    initial_position_left=init_left_pos,
+                    initial_position_right=init_right_pos,
+                    initial_size=size
+                )
+                new_tracker.last_matched_flag = matched_flag
+                if X_3D is not None and Y_3D is not None and Z_3D is not None:
+                    new_tracker.set_3D_position((X_3D, Y_3D, Z_3D))
                 self.trackers.append(new_tracker)
                 self.id_counter += 1
-            return
-
-        predictions = np.array([t.kalman_filter.predict()[:2].flatten() for t in self.trackers])
-        detections_np = np.array([det[0] for det in detections])
-
-        cost_matrix = np.linalg.norm(predictions[:, None] - detections_np, axis=2)
-        row_indices, col_indices = linear_sum_assignment(cost_matrix)
-
-        assigned_trackers = set()
-        for row, col in zip(row_indices, col_indices):
-            if cost_matrix[row, col] < COST_MATRIX_THRESHOLD:
-                corrected_position = self.trackers[row].kalman_filter.correct(detections[col][0])
-                self.trackers[row].update_position((corrected_position[0][0], corrected_position[1][0]), detections[col][1])
-                self.trackers[row].lost_frames = 0
-                self.trackers[row].active = True
-                assigned_trackers.add(row)
-
-        for i, tracker in enumerate(self.trackers):
-            if i not in assigned_trackers:
-                tracker.lost_frames += 1
-                if tracker.lost_frames > self.max_lost_frames:
-                    tracker.active = False
-
-        for i, detection in enumerate(detections):
-            if i not in col_indices:
-                self.trackers.append(Tracker(self.id_counter, detection[0], detection[1]))
-                self.id_counter += 1
-
-        self.trackers = [tracker for tracker in self.trackers if tracker.active]
-
-    def draw_trackers(self, frame):
-        for tracker in self.trackers:
-            smoothed_positions = tracker.get_smoothed_positions()
-            if len(smoothed_positions) >= 4:
-                x = [p[0] for p in smoothed_positions]
-                y = [p[1] for p in smoothed_positions]
-                t = np.linspace(0, len(x) - 1, num=len(x))
-                t_new = np.linspace(0, len(x) - 1, num=len(x) * 10)
-                cs_x = CubicSpline(t, x)
-                cs_y = CubicSpline(t, y)
-                x_new = cs_x(t_new)
-                y_new = cs_y(t_new)
-                for i in range(1, len(x_new)):
-                    cv2.line(frame, (int(x_new[i-1]), int(y_new[i-1])), (int(x_new[i]), int(y_new[i])), tracker.color, 2)
-            else:
-                for i in range(1, len(smoothed_positions)):
-                    prev_pos = smoothed_positions[i - 1]
-                    cur_pos = smoothed_positions[i]
-                    cv2.line(frame, (int(prev_pos[0]), int(prev_pos[1])), (int(cur_pos[0]), int(cur_pos[1])), tracker.color, 2)
-            print(f"Drawing trajectory for tracker {tracker.id} with {len(smoothed_positions)} positions.")
-
-
-def find_tracker_by_position(trackers, position, velocity_threshold=VELOCITY_THRESHOLD, distance_threshold=DISTANCE_THRESHOLD):
-    """Finds the closest tracker to the given position based on distance and velocity."""
-    best_tracker = None
-    min_cost = float('inf')  # Initialize with a large value
-    
-    for tracker in trackers:
-        # Calculate the Euclidean distance between the tracker’s last known position and the detected position
-        distance = np.linalg.norm(np.array(tracker.last_position) - np.array(position))
-        
-        # Optionally, include velocity in the cost calculation
-        velocity_diff = np.linalg.norm(np.array([tracker.vel_x, tracker.vel_y]))
-
-        if distance < distance_threshold:
-            # Combine distance and velocity to determine the cost of associating the tracker with the detection
-            cost = distance + velocity_diff  # You can weigh distance and velocity differently if needed
-            
-            # Update if this is the closest tracker so far
-            if cost < min_cost:
-                min_cost = cost
-                best_tracker = tracker
-
-    return best_tracker
-
-class Tracker3D:
-    """3D Tracker using Kalman filter to estimate position and velocity."""
-    def __init__(self, id, initial_3d_position):
-        self.id = id
-        self.positions_3d = [initial_3d_position]
-
-        # Initialize velocity
-        self.vel_x = 0
-        self.vel_y = 0
-        self.vel_z = 0
-
-        # Time step between frames
-        dt = TIME_PER_FRAME
-
-        # Kalman filter initialization
-        self.kalman = cv2.KalmanFilter(6, 3)
-        self.kalman.measurementMatrix = np.hstack((np.eye(3, dtype=np.float32), np.zeros((3, 3), dtype=np.float32)))
-        self.kalman.transitionMatrix = np.array([
-            [1, 0, 0, dt,  0,  0],
-            [0, 1, 0,  0, dt,  0],
-            [0, 0, 1,  0,  0, dt],
-            [0, 0, 0,  1,  0,  0],
-            [0, 0, 0,  0,  1,  0],
-            [0, 0, 0,  0,  0,  1]
-        ], dtype=np.float32)
-
-        q = 1e-2  # Process noise factor
-        self.kalman.processNoiseCov = q * np.array([
-            [(dt**4)/4, 0, 0, (dt**3)/2, 0, 0],
-            [0, (dt**4)/4, 0, 0, (dt**3)/2, 0],
-            [0, 0, (dt**4)/4, 0, 0, (dt**3)/2],
-            [(dt**3)/2, 0, 0, dt**2, 0, 0],
-            [0, (dt**3)/2, 0, 0, dt**2, 0],
-            [0, 0, (dt**3)/2, 0, 0, dt**2]
-        ], dtype=np.float32)
-
-        self.kalman.measurementNoiseCov = np.eye(3, dtype=np.float32) * 1e-1
-        self.kalman.errorCovPost = np.eye(6, dtype=np.float32) * 1.0
-
-        # Initialize state
-        self.kalman.statePost = np.array([
-            [initial_3d_position[0]],
-            [initial_3d_position[1]],
-            [initial_3d_position[2]],
-            [0.1],  # Small initial velocity in X
-            [0.1],  # Small initial velocity in Y
-            [0.1]   # Small initial velocity in Z
-        ], dtype=np.float32)
-
-    def predict(self):
-        """Predict the next state using the Kalman filter."""
-        self.kalman.predict()
-
-    def correct(self, measured_position_3d):
-        """Update the state using the Kalman filter."""
-        measurement = np.array([[measured_position_3d[0]],
-                                [measured_position_3d[1]],
-                                [measured_position_3d[2]]], dtype=np.float32)
-        self.kalman.correct(measurement)
-
-    def update_position(self, new_position_3d):
-        """Update the position and velocity of the tracker."""
-        self.predict()  # Predict the next state
-        self.correct(new_position_3d)  # Correct with the measurement
-
-        # Extract the updated state
-        corrected_state = self.kalman.statePost.flatten()
-        corrected_position = corrected_state[:3]
-        corrected_velocity = corrected_state[3:]
-
-        # Update tracker's position and velocity
-        self.positions_3d.append(corrected_position.tolist())
-        self.vel_x, self.vel_y, self.vel_z = corrected_velocity.tolist()
-
-
-    def get_smoothed_positions_3D(self, window_size=5):
-        """Smooth the positions using a simple moving average."""
-        if len(self.positions_3d) < window_size:
-            return self.positions_3d
-
-        smoothed_positions_3D = []
-        for i in range(len(self.positions_3d)):
-            start_index = max(0, i - window_size + 1)
-            end_index = i + 1
-            window_positions = self.positions_3d[start_index:end_index]
-            avg_x = sum(pos[0] for pos in window_positions) / len(window_positions)
-            avg_y = sum(pos[1] for pos in window_positions) / len(window_positions)
-            avg_z = sum(pos[2] for pos in window_positions) / len(window_positions)
-            smoothed_positions_3D.append((avg_x, avg_y, avg_z))
-        return smoothed_positions_3D
-
-    def filter_outliers(self, max_velocity_threshold=MAX_VELOCITY_THRESHOLD):
-        """Filter out unrealistic velocities."""
-        if np.abs(self.vel_x) > max_velocity_threshold:
-            self.vel_x *= 0.5  # Damp velocity instead of zeroing
-        if np.abs(self.vel_y) > max_velocity_threshold:
-            self.vel_y *= 0.5
-        if np.abs(self.vel_z) > max_velocity_threshold:
-            self.vel_z *= 0.5
-
 
 def main():
     # Load calibration data
@@ -595,37 +514,65 @@ def main():
     image_size = tuple(calib_data['DIM'])
 
     # Compute rectification and projection matrices for stereo setup
-    R1, R2, P1_rect, P2_rect, Q, _, _ = cv2.stereoRectify(K1, dist1, K2, dist2, image_size, R, T)
+    R1, R2, P1_rect, P2_rect, Q, _, _ = cv2.stereoRectify(
+        K1, dist1, K2, dist2, image_size, R, T
+    )
 
     # Initialize rectification maps for both cameras
-    map1_left, map2_left = cv2.initUndistortRectifyMap(K1, dist1, R1, P1_rect, image_size, cv2.CV_32FC1)
-    map1_right, map2_right = cv2.initUndistortRectifyMap(K2, dist2, R2, P2_rect, image_size, cv2.CV_32FC1)
+    map1_left, map2_left = cv2.initUndistortRectifyMap(
+        K1, dist1, R1, P1_rect, image_size, cv2.CV_32FC1
+    )
+    map1_right, map2_right = cv2.initUndistortRectifyMap(
+        K2, dist2, R2, P2_rect, image_size, cv2.CV_32FC1
+    )
 
-    # Initialize video capture for both left and right cameras
+    # Open video captures
     left_cap = cv2.VideoCapture(LEFT_VIDEO_PATH)
     right_cap = cv2.VideoCapture(RIGHT_VIDEO_PATH)
 
-    # Initialize tracker managers for both left and right views
-    manager_left = TrackerManager(OUTPUT_LEFT_CSV, OUTPUT_TRIANGULATION_CSV)
-    manager_right = TrackerManager(OUTPUT_RIGHT_CSV, OUTPUT_TRIANGULATION_CSV)
+    if not left_cap.isOpened() or not right_cap.isOpened():
+        print("Error: Could not open one of the video files.")
+        return
 
-    # Prepare video writer with high-quality settings
-    width = int(left_cap.get(cv2.CAP_PROP_FRAME_WIDTH))  # Original width
-    height = int(left_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))  # Original height
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')
-    left_output = cv2.VideoWriter('<Your output location/filename.avi>', fourcc, FPS, (width, height))
-    right_output = cv2.VideoWriter('<Your output location/filename.avi>', fourcc, FPS, (width, height))
+    frame_width = int(left_cap.get(cv2.CAP_PROP_FRAME_WIDTH) * SCALE_PERCENT / 100)
+    frame_height = int(left_cap.get(cv2.CAP_PROP_FRAME_HEIGHT) * SCALE_PERCENT / 100)
 
-    # Create directories to store output images
-    output_left_images_dir = '<Your output location/folder_left/>'
-    output_right_images_dir = 'Your output location/folder_right/'
-    os.makedirs(output_left_images_dir, exist_ok=True)
-    os.makedirs(output_right_images_dir, exist_ok=True)
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    fps = 30
+    
+    # --- VIDEO WRITERS ---
+    out_left = cv2.VideoWriter(
+        'left_no_trajectory.mp4', 
+        fourcc, 
+        fps, 
+        (frame_width, frame_height)
+    )
+    out_right_epilines = cv2.VideoWriter(
+        'right_no_trajectory_epilines.mp4',
+        fourcc, 
+        fps, 
+        (frame_width, frame_height)
+    )
+    out_left_detection = cv2.VideoWriter(
+        '/output_left_detection_no_trajectory.mp4',
+        fourcc, 
+        fps, 
+        (frame_width, frame_height)
+    )
+    out_right_detection = cv2.VideoWriter(
+        'output_right_detection_no_trajectory.mp4',
+        fourcc, 
+        fps, 
+        (frame_width, frame_height)
+    )
 
-    # Dictionary to store 3D trackers by shared ID
-    tracker_3d_dict = {}
+    manager = TrackerManager(OUTPUT_LEFT_CSV, OUTPUT_TRIANGULATION_CSV)
 
     frame_no = 0
+    total_reprojection_error_left = 0
+    total_reprojection_error_right = 0
+    total_frames = 0
+
     total_left_blobs_detected = 0
     total_right_blobs_detected = 0
     total_blobs_matched = 0
@@ -635,93 +582,163 @@ def main():
         ret_right, right_frame = right_cap.read()
 
         if not ret_left or not ret_right:
+            print("End of one of the video streams or cannot read the frame.")
             break
 
-        # Apply rectification maps to both frames
-        left_rectified = cv2.remap(left_frame, map1_left, map2_left, cv2.INTER_LINEAR)
-        right_rectified = cv2.remap(right_frame, map1_right, map2_right, cv2.INTER_LINEAR)
+        # Apply stereo rectification
+        rectified_left = cv2.remap(left_frame, map1_left, map2_left, cv2.INTER_LINEAR)
+        rectified_right = cv2.remap(right_frame, map1_right, map2_right, cv2.INTER_LINEAR)
 
-        # Detect blobs in both rectified frames
-        left_blobs = detect_blobs(left_rectified)
-        right_blobs = detect_blobs(right_rectified)
+        left_detection_frame = rectified_left.copy()
+        right_detection_frame = rectified_right.copy()
+
+        # Detect blobs
+        left_blobs = detect_blobs(rectified_left)
+        right_blobs = detect_blobs(rectified_right)
 
         total_left_blobs_detected += len(left_blobs)
         total_right_blobs_detected += len(right_blobs)
 
+        # Draw detection circles on copies
         for blob in left_blobs:
-            cv2.circle(left_rectified, blob[0], BLOB_CIRCLE_RADIUS, (255, 0, 0), 2)
+            cv2.circle(left_detection_frame, blob[0], BLOB_CIRCLE_RADIUS, (255, 0, 0), 2)
         for blob in right_blobs:
-            cv2.circle(right_rectified, blob[0], BLOB_CIRCLE_RADIUS, (255, 0, 0), 2)
+            cv2.circle(right_detection_frame, blob[0], BLOB_CIRCLE_RADIUS, (255, 0, 0), 2)
 
-        # Compute matching scores and get matches
-        matches = compute_matching_scores(left_blobs, right_blobs, F, manager_left.trackers, manager_right.trackers)
+        # Compute matches
+        matches = compute_matching_scores(left_blobs, right_blobs, F)
         total_blobs_matched += len(matches)
 
-        # Update shared tracker IDs for left and right frames
-        shared_tracker_ids = {}
-        for match in matches:
-            left_point, right_point = match['Left_Point'], match['Right_Point']
-            shared_id = manager_left.id_counter
-            shared_tracker_ids[shared_id] = (left_point, right_point)
-            manager_left.id_counter += 1
+        # Triangulate matched points
+        points_3D = []
+        if len(matches) > 0:
+            points_3D = triangulate_points(matches, calib_data)
+
+        # Identify unmatched blobs on left
+        unmatched_left = [
+            (blob[0], blob[1]) for blob in left_blobs
+            if blob[0] not in [m['Left_Point'] for m in matches]
+        ]
+
+        # Identify unmatched blobs on right
+        unmatched_right = [
+            (blob[0], blob[1]) for blob in right_blobs
+            if blob[0] not in [m['Right_Point'] for m in matches]
+        ]
+
+        # Build unified detection list
+        unified_detections = []
+
+        # For matched pairs: create one detection
+        for i, match in enumerate(matches):
+            left_pt = match['Left_Point']
+            right_pt = match['Right_Point']
+            size_left = next(b[1] for b in left_blobs if b[0] == left_pt)
+            size_right = next(b[1] for b in right_blobs if b[0] == right_pt)
+            X_3D, Y_3D, Z_3D = (None, None, None)
+            if points_3D is not None and len(points_3D) > i:
+                X_3D, Y_3D, Z_3D = points_3D[i]
+
+            unified_detections.append(
+                (left_pt[0], left_pt[1],
+                 size_left, 1,
+                 X_3D, Y_3D, Z_3D,
+                 right_pt[0], right_pt[1])
+            )
+
+        # For unmatched left:
+        for (pt, sz) in unmatched_left:
+            unified_detections.append((pt[0], pt[1], sz, 0, None, None, None, None, None))
+
+        # For unmatched right:
+        for (pt, sz) in unmatched_right:
+            unified_detections.append((None, None, sz, 0, None, None, None, pt[0], pt[1]))
 
         # Update trackers
-        manager_left.update_trackers([(m['Left_Point'], m['Size_Difference']) for m in matches], frame_no)
-        manager_right.update_trackers([(m['Right_Point'], m['Size_Difference']) for m in matches], frame_no)
+        manager.update_trackers(unified_detections, frame_no)
 
-        # Triangulate points and log to CSV
-        if matches:
-            # Triangulate 3D points
-            points_3D = triangulate_points(matches, calib_data)
-           
-            # Update 3D trackers
-            for shared_id, point_3D in zip(shared_tracker_ids.keys(), points_3D):
-                if shared_id in tracker_3d_dict:
-                    tracker_3d = tracker_3d_dict[shared_id]
-                    tracker_3d.update_position(point_3D)
-                else:
-                    tracker_3d_dict[shared_id] = Tracker3D(shared_id, point_3D)
-           
-                tracker_3d = tracker_3d_dict[shared_id]
-                print(f"Tracker {tracker_3d.id}: Position: {tracker_3d.positions_3d[-1]}, "
-                      f"Velocity: ({tracker_3d.vel_x:.2f}, {tracker_3d.vel_y:.2f}, {tracker_3d.vel_z:.2f})")
-           
-            # Log triangulated points and velocities
-            velocities = [[tracker.vel_x, tracker.vel_y, tracker.vel_z] for tracker in tracker_3d_dict.values()]
-            sizes = [m['Size_Difference'] for m in matches]
-            ids = list(shared_tracker_ids.keys())
-            manager_left.log_triangulation_to_csv(points_3D, frame_no, sizes, velocities, ids)
+        # Log trackers
+        for tracker in manager.trackers:
+            manager.log_to_csv(tracker, frame_no, matched=tracker.last_matched_flag)
+            if tracker.has_3D_info():
+                X_3D, Y_3D, Z_3D = tracker.get_3D_position()
+                vx, vy, vz = tracker.get_velocity()
+                manager.log_triangulation_to_csv(
+                    [(X_3D, Y_3D, Z_3D)],
+                    frame_no,
+                    [tracker.size],
+                    [(vx, vy, vz)],
+                    [tracker.id]
+                )
 
-        
-        for blob in left_blobs:
-            epiline = compute_epipolar_line(F, blob[0])
-            draw_epipolar_line(right_rectified, epiline)
-        # Draw matching lines
-        draw_matching_lines(left_rectified, right_rectified, matches)
-        manager_left.draw_trackers(left_rectified)
-        manager_right.draw_trackers(right_rectified)
+        # Compute reprojection error if there were matched points
+        if len(matches) > 0 and len(points_3D) == len(matches):
+            left_points_2D = np.array([m['Left_Point'] for m in matches])
+            right_points_2D = np.array([m['Right_Point'] for m in matches])
+            reprojection_error_left = calculate_reprojection_error(
+                calib_data['left_P'], points_3D, left_points_2D
+            )
+            reprojection_error_right = calculate_reprojection_error(
+                calib_data['right_P'], points_3D, right_points_2D
+            )
+            total_reprojection_error_left += reprojection_error_left
+            total_reprojection_error_right += reprojection_error_right
+            total_frames += 1
 
-        # Save frames
-        left_output.write(left_rectified)
-        right_output.write(right_rectified)
+        # Draw epipolar lines for matched detections on the right frame
+        for det in unified_detections:
+            if det[3] == 1:  # matched
+                left_pt = (int(det[0]), int(det[1]))
+                epiline = compute_epipolar_line(F, left_pt)
+                draw_epipolar_line(rectified_right, epiline)
 
-        cv2.imshow('Left', left_rectified)
-        cv2.imshow('Right', right_rectified)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        # Draw matching lines (but NOT trajectories) for visualization
+        draw_matching_lines(rectified_left, rectified_right, matches)
+
+        # Resize frames
+        dim = (frame_width, frame_height)
+        resized_left_frame = cv2.resize(rectified_left, dim, interpolation=cv2.INTER_AREA)
+        resized_right_frame = cv2.resize(rectified_right, dim, interpolation=cv2.INTER_AREA)
+        resized_left_detection_frame = cv2.resize(left_detection_frame, dim, interpolation=cv2.INTER_AREA)
+        resized_right_detection_frame = cv2.resize(right_detection_frame, dim, interpolation=cv2.INTER_AREA)
+
+        # Write frames to files (no trajectories drawn)
+        out_left.write(resized_left_frame)
+        out_right_epilines.write(resized_right_frame)
+        out_left_detection.write(resized_left_detection_frame)
+        out_right_detection.write(resized_right_detection_frame)
+
+        # Display
+        cv2.imshow('Left Frame (No Trajectories)', resized_left_frame)
+        cv2.imshow('Right Frame with Epipolar Lines (No Trajectories)', resized_right_frame)
+        cv2.imshow('Left Frame Detections (No Trajectories)', resized_left_detection_frame)
+        cv2.imshow('Right Frame Detections (No Trajectories)', resized_right_detection_frame)
+
+        if cv2.waitKey(DISPLAY_WAIT_KEY) & 0xFF == ord('q'):
+            print("Quitting the video processing loop.")
             break
 
         frame_no += 1
 
+    # Cleanup
     left_cap.release()
     right_cap.release()
-    left_output.release()
-    right_output.release()
+    out_left.release()
+    out_right_epilines.release()
+    out_left_detection.release()
+    out_right_detection.release()
     cv2.destroyAllWindows()
 
+    # Print statistics
     print(f"Total Left Blobs Detected: {total_left_blobs_detected}")
     print(f"Total Right Blobs Detected: {total_right_blobs_detected}")
     print(f"Total Matched Blobs (Pairs): {total_blobs_matched}")
 
+    if total_frames > 0:
+        overall_reprojection_error_left = total_reprojection_error_left / total_frames
+        overall_reprojection_error_right = total_reprojection_error_right / total_frames
+        print(f"Overall Reprojection Error - Left: {overall_reprojection_error_left:.4f}, "
+              f"Right: {overall_reprojection_error_right:.4f}")
 
 if __name__ == '__main__':
     main()
