@@ -10,7 +10,7 @@ Camera Setup.
 
 ## Method Overview
 
-![method.png](./assets/method.png)
+![newflowchart.png](./assets/method.png)
 
 Existing OpenCV-based methods have been utilized for the detection and tracking of insects, specifically honeybees in this case using a stereoscopic setup of event-based cameras. The methodology involves the sequential application of image processing techniques such as erosion, dilation, and contour detection, followed by the implementation of a Kalman filter to accurately identify and track individual bees within the field of view. This approach leverages well-established and robust algorithms to achieve reliable performance in dynamic and complex environments. The study evaluates the algorithm in two interconnected components: the detection phase and the tracking phase.
 
