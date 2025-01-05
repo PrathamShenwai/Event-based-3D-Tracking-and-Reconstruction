@@ -60,5 +60,5 @@ matching video goes here
 
 ## Acknowledgments
 
-We thank ChristianOrr for releasing their code to calibrate the stereo cameras.
-[ChristianOrr](https://github.com/ChristianOrr/stereo-camera-calibration)
+We thank [ChristianOrr](https://github.com/ChristianOrr/stereo-camera-calibration) for releasing their code to calibrate the stereo cameras.
+
