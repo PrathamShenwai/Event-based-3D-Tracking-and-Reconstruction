@@ -42,7 +42,7 @@ Video comes here
 
 ## Stereo Calibration
 
-We have used [XYZ's repository](https://github.com/username/repository) to calibrate my event-based stereo setup. You can refer to his repository to generate the `calibration.json` file.
+We have used [ChristianOrr's repository](https://github.com/ChristianOrr/stereo-camera-calibration) to calibrate my event-based stereo setup. You can refer to his repository to generate the `calibration.json` file.
 
 video of stereo calibration
 
@@ -60,5 +60,5 @@ matching video goes here
 
 ## Acknowledgments
 
-We thank XYZ for releasing their code to calibrate the stereo cameras.
-[XYZ](https://github.com/cpeng93/PDRF)
+We thank ChristianOrr for releasing their code to calibrate the stereo cameras.
+[ChristianOrr](https://github.com/ChristianOrr/stereo-camera-calibration)
