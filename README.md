@@ -1,13 +1,5 @@
 # Field Tracking of Insects Using a Stereoscopic Event-Based Camera Setup
 
-paper:
-
-Video:
-
-This is the official implementation of the **JEB** paper
-Field Tracking of Insects Using a Stereoscopic Event-Based
-Camera Setup.
-
 ## Method Overview
 
 ![newflowchart.png](./assets/newflowchart.png)
@@ -61,4 +53,5 @@ matching video goes here
 ## Acknowledgments
 
 We thank [ChristianOrr](https://github.com/ChristianOrr/stereo-camera-calibration) for releasing their code to calibrate the stereo cameras.
+
 
